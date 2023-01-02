@@ -1,22 +1,234 @@
-#%%
-import math
-from decimal import Decimal
-from radis import calc_spectrum, Spectrum
+from radis import calc_spectrum, Spectrum, SerialSlabs
+from radis.spectrum.operations import add_array, multiply
 
-# NOTE for graphing
+from specutils import SpectralRegion
+from specutils.manipulation import noise_region_uncertainty
+from specutils.fitting import find_lines_threshold, find_lines_derivative
+
+import astropy.units as u
 import numpy as np
-import matplotlib.pyplot as plt
 
-# function presents error and usage to user, then quits
-def __error(error_text):
-    print(error_text)
-    print(
-        "  usage: python3 generate_spectra.py <source (t or g)> <min-wavenumber (cm^-1)>  <max-wavenumber (cm^-1)> <beamsplitter AR_ZnSe or AR_CaF2> <cell_window KBr or CaF2 or ZnSe> <detector MCT or InSb>"
+# --------------------------------------
+# ---- spectra calculation functions ----
+# --------------------------------------
+
+def __CaF2(data):
+    '''
+    Returns a function that approximates a CaF2 Cell Window.
+
+            Parameters:
+                data (int): the range of x-values for the function
+            
+            Returns:
+                The approximated function
+    '''
+
+    return (0.93091) / (1 + (11.12929 / (data / 1000)) ** -12.43933) ** 4.32574
+
+
+def __ZnSe(data):
+    '''
+    Returns a function that approximates a ZnSe Cell Window.
+
+            Parameters:
+                data (int): the range of x-values for the function
+            
+            Returns:
+                The approximated function
+    '''
+
+    x_um = data / 1000
+    return (0.71015) / ((1 + (20.99353 / x_um) ** -19.31355) ** 1.44348) + -0.13265 / (
+        2.25051 * np.sqrt(np.pi / (4 * np.log(2)))
+    ) * np.exp(-4 * np.log(2) * ((x_um - 16.75) ** 2) / (2.25051**2))
+
+
+def __sapphire(data):
+    '''
+    Returns a function that approximates a Sapphire Window.
+
+            Parameters:
+                data (int): the range of x-values for the function
+            
+            Returns:
+                The approximated function
+    '''
+
+    return 0.78928 / (1 + (11.9544 / (data / 1000)) ** -12.07226) ** 6903.57039
+
+
+def __AR_ZnSe(data):
+    '''
+    Returns a function that approximates a AR_ZnSe Beamsplitter.
+
+            Parameters:
+                data (int): the range of x-values for the function
+            
+            Returns:
+                The approximated function
+    '''
+
+    x_um = data / 1000
+    return (
+        (0.82609) / ((1 + ((34.63971 / x_um) ** -8.56269)) ** 186.34792)
+        + -0.47
+        / (0.55 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 1.47) ** 2) / (0.55**2))
+        + -0.03456
+        / (0.4 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 2.88) ** 2) / (0.4**2))
+        + -0.009
+        / (0.3 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 6.16) ** 2) / (0.3**2))
+        + -0.09
+        / (1 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 16.2) ** 2) / (1**2))
+        + -0.08
+        / (1 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 17.4) ** 2) / (1**2))
+        + 1.12
+        / (8 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 9.5) ** 2) / (8**2))
+        + 0.11546
+        / (2 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 4.9) ** 2) / (2**2))
+        + 0.21751
+        / (2 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 2.6) ** 2) / (2**2))
+        + -0.05
+        / (0.07 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 0.8) ** 2) / (0.07**2))
     )
-    quit()
 
 
+def __AR_CaF2(data):
+    '''
+    Returns a function that approximates a AR_CaF2 Beamsplitter.
+
+            Parameters:
+                data (int): the range of x-values for the function
+            
+            Returns:
+                The approximated function
+    '''
+
+    x_um = data / 1000
+    return (
+        (0.9795) / ((1 + ((18.77617 / x_um) ** -6.94246)) ** 91.98745)
+        + -0.06
+        / (0.08 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 0.76) ** 2) / (0.08**2))
+        + -0.06
+        / (0.2 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * (x_um - 1.06) ** 2 / 0.20**2)
+        + -0.6
+        / (3.0 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 4.85) ** 2) / (3.0**2))
+        + -0.35
+        / (1.0 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 9.40) ** 2) / (1.00**2))
+        + 0.05
+        / (0.8 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 2.60) ** 2) / (0.8**2))
+        + 0.04
+        / (0.5 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 7.75) ** 2) / (0.50**2))
+        + -0.01
+        / (0.6 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 6.55) ** 2) / (0.6**2))
+        + 0.01
+        / (0.5 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 1.82) ** 2) / (0.5**2))
+    )
+
+
+def __InSb(data):
+    '''
+    Returns a function that approximates a InSb Dectector.
+
+            Parameters:
+                data (int): the range of x-values for the function
+            
+            Returns:
+                The approximated function
+    '''
+
+    x_um = data / 1000
+    return 1.97163e11 * (1 / (1 + np.exp(-(x_um - 5.3939) / 1.6624))) * (
+        1 - 1 / (1 + np.exp(-(x_um - 5.3939) / 0.11925))
+    ) + (3.3e10) / (2.44977 * np.sqrt(np.pi / (4 * np.log(2)))) * np.exp(
+        -4 * np.log(2) * ((x_um - 5) ** 2) / (2.44977**2)
+    )
+
+
+def __MCT(data):
+    '''
+    Returns a function that approximates a MCT Dectector.
+
+            Parameters:
+                data (int): the range of x-values for the function
+            
+            Returns:
+                The approximated function
+    '''
+
+    x_um = data / 1000
+    return (
+        (1.98748 * (10**9))
+        + (2.10252 * (10**10))
+        * (1 / (1 + np.exp(-(x_um - 20.15819) / 5.73688)))
+        * (1 - 1 / (1 + np.exp(-(x_um - 20.15819) / 1.11659)))
+        + (1.3 * (10**9))
+        / (2 * np.sqrt(np.pi / (4 * np.log(2))))
+        * np.exp(-4 * np.log(2) * ((x_um - 18.6) ** 2) / (2**2))
+    )
+
+def __zeroY(data):
+    '''
+    Returns a function of y = 1 for generating background samples.
+
+            Parameters:
+                data (int): the range of x-values for the function
+            
+            Returns:
+                The approximated function
+    '''
+    return (data * 0) + 1
+
+def __sPlanck(spectrum, temp):
+    '''
+    Returns a function that generates a Blackbody Spectrum.
+
+            Parameters:
+                data (int): the range of x-values for the spectrum
+            
+            Returns:
+                The Blackbosy Spectrum
+    '''
+
+    H = 6.62606957e-34
+    C = 2.99792458e8
+    K_B = 1.3806488e-23
+
+    return ((0.2 * H * (C**2)) / (((spectrum * (10**-9)) ** 4) * spectrum)) * (
+        1 / (np.exp((H * C) / ((spectrum * (10**-9)) * K_B * temp)) - 1)
+    )
+
+
+# -------------------------------------
+# ---------- helper functions ----------
+# ------------------------------------
 def __loadData(s):
+    '''
+    Takes a spectrum and converts its data to a dictionary of x and y values.
+
+            Parameters:
+                s (Spectrum): The spectrum to convert
+            
+            Returns:
+                A dictionary of x (key) and y (value) values
+    '''
+
     data = {}
 
     for key, val in zip(s[0], s[1]):
@@ -25,384 +237,373 @@ def __loadData(s):
     return data
 
 
-def __KBr(data):
-    if data == None:
-        return False
+def __param_check(data):
+    '''
+    Checks user given parameters and makes sure they are vaild.
 
-    for x in data:
-        datapoint = (0.92267) / (1 + (25.66477 / (x / 1000)) ** -12.35159) ** 0.17344
-        data[x] = datapoint * data[x]
+        Parameters:
+            data (dict): the user given parameters
 
-    return data
+        Returns:
+            Good if params are good. Else, returns an error message
+    '''
 
-
-def __CaF2(data):
-    if data == None:
-        return False
-
-    for x in data:
-        datapoint = (0.93091) / (1 + (11.12929 / (x / 1000)) ** -12.43933) ** 4.32574
-        data[x] = datapoint * data[x]
-
-    return data
-
-
-def __ZnSe(data):
-    if data == None:
-        return False
-
-    for x in data:
-        x_um = x / 1000
-        datapoint = (0.71015) / (
-            (1 + (20.99353 / x_um) ** -19.31355) ** 1.44348
-        ) + -0.13265 / (2.25051 * math.sqrt(math.pi / (4 * math.log(2)))) * math.exp(
-            -4 * math.log(2) * ((x_um - 16.75) ** 2) / (2.25051**2)
-        )
-        data[x] = datapoint * data[x]
-
-    return data
-
-
-def __sapphire(data):
-    if data == None:
-        return False
-
-    for x in data:
-        # Gets accurate graph with numpy float128 but throws runtime overflow error
-        # datapoint = Decimal(0.78928) / Decimal(1 + (11.9544 / (x / 1000)) ** -12.07226 ) ** (Decimal(6903.57039))
-        datapoint = np.float128(0.78928) / np.float128(
-            1 + (11.9544 / (x / 1000)) ** -12.07226
-        ) ** (np.float128(6903.57039))
-        dp2 = datapoint * np.float128(data[x])
-        data[x] = dp2
-
-    return data
-
-
-def __AR_ZnSe(data):
-    if data == None:
-        return False
-
-    for x in data:
-        x_um = x / 1000
-        datapoint = (
-            (0.82609) / ((1 + ((34.63971 / x_um) ** -8.56269)) ** 186.34792)
-            + -0.47
-            / (0.55 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 1.47) ** 2) / (0.55**2))
-            + -0.03456
-            / (0.4 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 2.88) ** 2) / (0.4**2))
-            + -0.009
-            / (0.3 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 6.16) ** 2) / (0.3**2))
-            + -0.09
-            / (1 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 16.2) ** 2) / (1**2))
-            + -0.08
-            / (1 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 17.4) ** 2) / (1**2))
-            + 1.12
-            / (8 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 9.5) ** 2) / (8**2))
-            + 0.11546
-            / (2 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 4.9) ** 2) / (2**2))
-            + 0.21751
-            / (2 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 2.6) ** 2) / (2**2))
-            + -0.05
-            / (0.07 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 0.8) ** 2) / (0.07**2))
-        )
-
-        data[x] = datapoint * data[x]
-
-    return data
-
-
-def __AR_CaF2(data):
-    if data == None:
-        return False
-
-    for x in data:
-        x_um = x / 1000
-        datapoint = (
-            (0.9795) / ((1 + ((18.77617 / x_um) ** -6.94246)) ** 91.98745)
-            + -0.06
-            / (0.08 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 0.76) ** 2) / (0.08**2))
-            + -0.06
-            / (0.2 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * (x_um - 1.06) ** 2 / 0.20**2)
-            + -0.6
-            / (3.0 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 4.85) ** 2) / (3.0**2))
-            + -0.35
-            / (1.0 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 9.40) ** 2) / (1.00**2))
-            + 0.05
-            / (0.8 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 2.60) ** 2) / (0.8**2))
-            + 0.04
-            / (0.5 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 7.75) ** 2) / (0.50**2))
-            + -0.01
-            / (0.6 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 6.55) ** 2) / (0.6**2))
-            + 0.01
-            / (0.5 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 1.82) ** 2) / (0.5**2))
-        )
-        data[x] = datapoint * data[x]
-
-    return data
-
-
-def __InSb(data):
-    if data == None:
-        return False
-
-    for x in data:
-        x_um = x / 1000
-        datapoint = 1.97163e11 * (1 / (1 + math.exp(-(x_um - 5.3939) / 1.6624))) * (
-            1 - 1 / (1 + math.exp(-(x_um - 5.3939) / 0.11925))
-        ) + (3.3e10) / (2.44977 * math.sqrt(math.pi / (4 * math.log(2)))) * math.exp(
-            -4 * math.log(2) * ((x_um - 5) ** 2) / (2.44977**2)
-        )
-        # add noise to InSb
-        data[x] = (datapoint + np.random.normal(0, 200000000)) * data[x]
-
-    return data
-
-
-def __MCT(data):
-    if data == None:
-        return False
-
-    for x in data:
-        x_um = x / 1000
-        datapoint = (
-            (1.98748 * (10**9))
-            + (2.10252 * (10**10))
-            * (1 / (1 + math.exp(-(x_um - 20.15819) / 5.73688)))
-            * (1 - 1 / (1 + math.exp(-(x_um - 20.15819) / 1.11659)))
-            + (1.3 * (10**9))
-            / (2 * math.sqrt(math.pi / (4 * math.log(2))))
-            * math.exp(-4 * math.log(2) * ((x_um - 18.6) ** 2) / (2**2))
-        )
-        # add noise to MCT
-        data[x] = (datapoint + np.random.normal(0, 20000000)) * data[x]
-
-    return data
-
-
-def __sPlanck(spectrum, temp):
-    H = 6.62606957e-34
-    C = 2.99792458e8
-    K_B = 1.3806488e-23
-
-    if spectrum == None:
-        return False
-
-    for x in spectrum:
-        x2 = x * (10**-9)
-        p = ((0.2 * H * (C**2)) / ((x2**4) * x)) * (
-            1 / (math.exp((H * C) / (x2 * K_B * temp)) - 1)
-        )
-        spectrum[x] = spectrum[x] * p
-
-    return spectrum
-
-
-def graph(spectrum):
-    xs = []
-    ys = []
-    for key in spectrum:
-        xs.append(float(key))
-        ys.append(float(spectrum[key]))
-    plt.plot(np.array(xs), np.array(ys), "blue")
-    plt.show()
-
-
-def check_params(source, min_wavenum, max_wavenum, beamsplitter, cell_window, detector):
-    # check if source is correct (t or g)
-    if (source != "t") and (source != "g"):
-        __error("  source needs to be <t> or <g>. provided source: %s" % (source))
-
-    # set source_temp based on source input
-    if source == "g":
-        source_temp = 1700
-    elif source == "t":
-        source_temp = 3100
+    print("----- check number of keys -----")
+    if len(data) == 11:
+        print("  good!")
     else:
-        __error("  source needs to be <t> or <g>. provided source: %s" % (source))
+        print("  not enough params. total params: %s" % (len(data)))
+        return "not enough params. total params: %s" % (len(data))
 
-    # check if wavenumbers are correct
-    if min_wavenum < 400:
-        __error(
-            "  min wavenumber is out of range (400 - 12500). provided min: %s"
-            % (min_wavenum)
-        )
-    elif min_wavenum > 12500:
-        __error(
-            "  max wavenumber is out of range (400 - 12500). provided max: %s"
-            % (max_wavenum)
-        )
-    elif min_wavenum > max_wavenum:
-        __error(
-            "  min wavenumber is greater than max wavenumber. provided min: %s  provided max: %s"
-            % (min_wavenum, max_wavenum)
-        )
-    elif min_wavenum == max_wavenum:
-        __error(
-            "  min wavenumber is equivalent to max wavenumber. provided min: %s  provided max: %s"
-            % (min_wavenum, max_wavenum)
-        )
+    print("----- check if params are correct -----")
+    valid_params = [
+        "minWave",
+        "maxWave",
+        "molecule",
+        "pressure",
+        "resolution",
+        "numScan",
+        "zeroFill",
+        "source",
+        "beamsplitter",
+        "cellWindow",
+        "detector",
+    ]
+    for key, value in data.items():
+        if key in valid_params:
+            if (data[key] == "") or (data[key] == None):
+                print("  error with key: %s. Value is: %s" % (key, value))
+                return "Error with key: %s. Value is: %s" % (key, value)
+            else:
+                print("  %s: %s" % (key, value))
+        else:
+            print("  error with key: %s. Value is: %s" % (key, value))
+            return "Error with key: %s. Value is: %s" % (key, value)
 
-    # check if beamsplitter is vaild
-    if beamsplitter != "AR_ZnSe" and beamsplitter != "AR_CaF2":
-        __error(
-            " given beamsplitter option is not a vaild option\n Valid Options:  AR_ZnSe  AR_CaF2"
-        )
 
-    # check if cell_window is vaild
-    if cell_window != "CaF2" and cell_window != "ZnSe":
-        __error(
-            " given cell window option is not a vaild option\n Valid Options:  CaF2  ZnSe"
-        )
+def __calc_wstep(resolution, zero_fill):
+    '''
+    Calculates the apropriate wstep for a spectrum based on the given resolution and zero fill.
 
-    # check if detector is vaild
-    if detector != "MCT" and detector != "InSb":
-        __error(
-            " given detector option is not a vaild option\n Valid Options:  MCTs  InSb"
-        )
+        Parameters:
+            resolution (int): the given resolution
+            xero_fill (int): the given zero fill
 
-    # output verified params to console as self-check before calc_spectrum()
-    print(
-        "source: %s   source_temp: %s   min_wavenum: %s   max_wavenum: %s   beamspliter: %s   cell_window: %s   detector: %s"
-        % (
-            source,
-            source_temp,
-            min_wavenum,
-            max_wavenum,
-            beamsplitter,
-            cell_window,
-            detector,
-        )
+        Returns:
+            The calculated wstep
+    '''
+
+    wstep = 0
+
+    if resolution == 1:
+
+        if zero_fill == 0:
+            wstep = 0.481927711
+        elif zero_fill == 1:
+            wstep = 0.240963855
+        elif zero_fill == 2:
+            wstep = 0.120481928
+
+    elif resolution == 0.5:
+
+        if zero_fill == 0:
+            wstep = 0.240963855
+        elif zero_fill == 1:
+            wstep = 0.120481928
+        elif zero_fill == 2:
+            wstep = 0.060240964
+
+    elif resolution == 0.25:
+
+        if zero_fill == 0:
+            wstep = 0.120481928
+        elif zero_fill == 1:
+            wstep = 0.060240964
+        elif zero_fill == 2:
+            wstep = 0.030120482
+
+    elif resolution == 0.125:
+
+        if zero_fill == 0:
+            wstep = 0.060240964
+        elif zero_fill == 1:
+            wstep = 0.030120482
+        elif zero_fill == 2:
+            wstep = 0.015060241
+
+    elif resolution == 0.0625:
+
+        if zero_fill == 0:
+            wstep = 0.030120482
+        elif zero_fill == 1:
+            wstep = 0.015060241
+        elif zero_fill == 2:
+            wstep = 0.00753012
+
+    return wstep
+
+# ------------------------------
+# ----- Spectra Processing -----
+# ------------------------------
+
+def __find_peaks(data, spectrum):    
+    find_peaks = spectrum.to_specutils('transmittance_noslit', 'nm_vac') #had to put vac, cannot put air
+    lines = find_lines_threshold(find_peaks, noise_factor=200000000) #what should this be set to?
+
+    lines.write ("lines.txt", format="ascii", overwrite=True)
+
+
+def __process_spectra(data, s, find_peaks):
+    '''
+    Takes a spectrum and adds noise that approximates a real spectrometer.
+
+    This is achieved by creating additonal spectra based on functions that 
+    approximate the behavior of FTIR components. Those spectra are then 
+    multiplied into the base spectrum. 
+
+    All steps except pre-processing, Step A, and post-processing are repeated
+    a number of times given by the user. At the end of each loop, the spectrum
+    is normalized.
+
+    If the spectrum is a background sample, no post-processing is done. 
+    Otherwise, an algorithm for find the peaks of the spectrum is executed
+
+        Parameters:
+            data (dict): User given parameters
+            s (Spectrum): The given spectrum
+            find_peaks (boolean): Tells wether or not the find peaks algorithm should run
+
+        Returns:
+            The processed spectrum as a dictionary
+
+    '''
+
+    # ----- Pre-processing -----
+    # Generate the necessary spectra for each component of the following processing steps
+    # The spectra are generated based on the function provided in the call to the Spectrum constructor
+    w = s.get_wavelength()
+
+    # TODO The Radis dev gave us this part
+    spec_sPlanck = Spectrum(
+        {
+            "wavelength": w,
+            "transmittance_noslit": __sPlanck(w, data["source"]),
+            "radiance_noslit": np.zeros_like(w),
+        },
+        wunit="nm",
+        units={"radiance_noslit": "mW/cm2/sr/nm", "transmittance_noslit": ""},
+        name="CaF2 window",
     )
-
-    return source_temp
-
-
-#%%
-if __name__ == "__main__":
-    # NOTE for graphing
-    source = "t"
-    min_wavenum = 1900
-    max_wavenum = 2300
-    beamsplitter = "AR_ZnSe"
-    cell_window = "CaF2"
-    detector = "MCT"
-
-    # check params
-    source_temp = check_params(
-        source,
-        min_wavenum,
-        max_wavenum,
-        beamsplitter,
-        cell_window,
-        detector,
+    spec_AR_ZnSe = Spectrum(
+        {
+            "wavelength": w,
+            "transmittance_noslit": __AR_ZnSe(w),
+            "radiance_noslit": np.zeros_like(w),
+        },
+        wunit="nm",
+        units={"radiance_noslit": "mW/cm2/sr/nm", "transmittance_noslit": ""},
+        name="CaF2 window",
     )
-
-    print(source_temp)
-
-    # ----- a.) transmission spectrum of gas sample -----
-    # https://radis.readthedocs.io/en/latest/source/radis.lbl.calc.html#radis.lbl.calc.calc_spectrum
-    s = calc_spectrum(
-        min_wavenum,
-        max_wavenum,
-        molecule="CO",
-        isotope="1,2,3",
-        pressure=0.01,  # bar
-        Tgas=294.15,  # K
-        path_length=10,  # cm
-        wstep=0.5,  # cm^-1
-        verbose=False,  # hides HITRAN output
-        databank="hitran",
-        warnings={"AccuracyError": "ignore"},
+    spec_AR_CaF2 = Spectrum(
+        {
+            "wavelength": w,
+            "transmittance_noslit": __AR_CaF2(w),
+            "radiance_noslit": np.zeros_like(w),
+        },
+        wunit="nm",
+        units={"radiance_noslit": "mW/cm2/sr/nm", "transmittance_noslit": ""},
+        name="CaF2 window",
     )
-
-    # generate spectrum with noise
-    # https://radis.readthedocs.io/en/latest/source/radis.spectrum.operations.html#radis.spectrum.operations.add_array
-    noise = __loadData(s.get("transmittance_noslit", wunit="nm", Iunit="default"))
-    for x in noise:
-        noise[x] = noise[x] + np.random.normal(0, 1)
-
-    spectrum = __loadData(s.get("transmittance_noslit", wunit="nm", Iunit="default"))
-
+    spec_CaF2 = Spectrum(
+        {
+            "wavelength": w,
+            "transmittance_noslit": __CaF2(w),
+            "radiance_noslit": np.zeros_like(w),
+        },
+        wunit="nm",
+        units={"radiance_noslit": "mW/cm2/sr/nm", "transmittance_noslit": ""},
+        name="CaF2 window",
+    )
+    spec_ZnSe = Spectrum(
+        {
+            "wavelength": w,
+            "transmittance_noslit": __ZnSe(w),
+            "radiance_noslit": np.zeros_like(w),
+        },
+        wunit="nm",
+        units={"radiance_noslit": "mW/cm2/sr/nm", "transmittance_noslit": ""},
+        name="CaF2 window",
+    )
+    spec_sapphire = Spectrum(
+        {
+            "wavelength": w,
+            "transmittance_noslit": __sapphire(w),
+            "radiance_noslit": np.zeros_like(w),
+        },
+        wunit="nm",
+        units={"radiance_noslit": "mW/cm2/sr/nm", "transmittance_noslit": ""},
+        name="CaF2 window",
+    )
+    spec_MCT = Spectrum(
+        {
+            "wavelength": w,
+            "transmittance_noslit": __MCT(w),
+            "radiance_noslit": np.zeros_like(w),
+        },
+        wunit="nm",
+        units={"radiance_noslit": "mW/cm2/sr/nm", "transmittance_noslit": ""},
+        name="CaF2 window",
+    )
+    spec_InSb = Spectrum(
+        {
+            "wavelength": w,
+            "transmittance_noslit": __InSb(w),
+            "radiance_noslit": np.zeros_like(w),
+        },
+        wunit="nm",
+        units={"radiance_noslit": "mW/cm2/sr/nm", "transmittance_noslit": ""},
+        name="CaF2 window",
+    )
+    
     # ----- b.) blackbody spectrum of source -----
-    spectrum = __sPlanck(spectrum, source_temp)
+    # SerialSlabs() multiplies the transmittance values (y-values) of the provided spectrum, s, with 
+    # the corresponding transmittance values of the spec_sPlanck spectrum
+    # https://radis.readthedocs.io/en/latest/source/radis.los.slabs.html#radis.los.slabs.SerialSlabs
+    spectrum = SerialSlabs(s, spec_sPlanck)
 
-    # ----- c.) transmission spectrum of windows/beamsplitter -----
-    # Beamsplitter
-    if beamsplitter == "AR_ZnSe":
-        spectrum = __AR_ZnSe(spectrum)
-    elif beamsplitter == "AR_CaF2":
-        spectrum = __AR_CaF2(spectrum)
+    # This loop simpulates scans and runs as many times as the user indicated in "Number of Scans"
+    for x in range(data["numScan"]):
+        
+        # ----- c.) transmission spectrum of windows/beamsplitter -----
 
-    # Cell Windows
-    if cell_window == "CaF2":
-        spectrum = __CaF2(spectrum)
-        spectrum = __CaF2(spectrum)
-    elif cell_window == "ZnSe":
-        spectrum = __ZnSe(spectrum)
-        spectrum = __ZnSe(spectrum)
+        # ----- c.1) Beamsplitter -----
+        if data["beamsplitter"] == "AR_ZnSe":
+            spectrum = SerialSlabs(spectrum, spec_AR_ZnSe)
+        elif data["beamsplitter"] == "AR_CaF2":
+            spectrum = SerialSlabs(spectrum, spec_AR_CaF2)
 
-    # ----- d.) detector response spectrum -----
-    if detector == "MCT":
-        spectrum = __ZnSe(spectrum)
-        spectrum = __MCT(spectrum)
-    elif detector == "InSb":
-        spectrum = __sapphire(spectrum)
-        spectrum = __InSb(spectrum)
+        # ----- c.2) Cell Windows -----
+        if data["cellWindow"] == "CaF2":
+            spectrum = SerialSlabs(spectrum, spec_CaF2)
+            spectrum = SerialSlabs(spectrum, spec_CaF2)
+        elif data["cellWindow"] == "ZnSe":
+            spectrum = SerialSlabs(spectrum, spec_ZnSe)
+            spectrum = SerialSlabs(spectrum, spec_ZnSe)
 
-    graph(spectrum)
+         # ----- d.) detector response spectrum -----
+        if data["detector"] == "MCT":
+            spectrum = SerialSlabs(spectrum, spec_ZnSe)
+            spectrum = SerialSlabs(spectrum, spec_MCT)
+        elif data["detector"] == "InSb":
+            spectrum = SerialSlabs(spectrum, spec_sapphire)
+            spectrum = SerialSlabs(spectrum, spec_InSb)
 
-    # Turns the dictionary back into a radis Spectrum object
-    waverange = []
-    vector = []
+        spectrum = add_array(
+            spectrum,
+            np.random.normal(0, 200000000, len(spectrum)),
+            var="transmittance_noslit",
+        )
 
-    for x in spectrum:
-        waverange.append(x)
-        vector.append(spectrum[x])
+        # Normalize data
+        # numbers = __loadData(
+        #     spectrum.get("transmittance_noslit", wunit="nm", Iunit="default")
+        # )
+        # factor = 1 / sum(numbers.values())
 
-    # TODO --> does not work, potential fix: https://github.com/radis/radis/pull/499
-    # processed_spec = Spectrum.from_array(
-    #     np.array(waverange),
-    #     np.array(vector),
-    #     "transmittance_noslit",
-    #     wunit="nm",
-    #     Iunit="nm",
-    # )
-    # # find peaks in spectrum
-    # # https://radis.readthedocs.io/en/latest/source/radis.spectrum.spectrum.html#radis.spectrum.spectrum.Spectrum.to_specutils
-    # spec_u = processed_spec.to_specutils(
-    #     "transmittance_noslit", wunit="nm", Iunit="default"
-    # )
+        # spectrum = multiply(spectrum, factor, var="transmittance_noslit")
 
-    # TODO --> potential working solution (does not throw error in dev branch as of 8/12/2022):
-    # processed_spec = Spectrum.from_array(
-    #     np.array(waverange),
-    #     np.array(vector),
-    #     "transmittance_noslit",
-    #     wunit="nm",
-    #     Iunit="",
-    # )
-    # # find peaks in spectrum
-    # # https://radis.readthedocs.io/en/latest/source/radis.spectrum.spectrum.html#radis.spectrum.spectrum.Spectrum.to_specutils
-    # spec_u = processed_spec.to_specutils(
-    #     "transmittance_noslit", wunit="nm_vac", Iunit="default"
-    # )
+    # Post-processing - Find Peaks
+    # Not done on background samples
+    # https://radis.readthedocs.io/en/latest/auto_examples/plot_specutils_processing.html#sphx-glr-auto-examples-plot-specutils-processing-py
+    if find_peaks:
+        __find_peaks(data, spectrum)
 
-#%%
+    # Return spectrum as a dictionary
+    return __loadData(spectrum.get("transmittance_noslit", wunit="nm", Iunit="default"))
+
+def __generate_spectra(data):
+    '''
+    Generates a spectrum using radis based on user given parameters.
+
+    That spectrum is then processed by __process_spectra.
+
+    If there is an issue reaching out to radis, the error is caught and False is returned
+
+        Paramters:
+            data (dict): the user given parameters
+
+        Return:
+            The fully processed spectrum or False if there is an error
+    '''
+
+    try:
+        wstep = __calc_wstep(data["resolution"], data["zeroFill"])
+        # ----- a.) transmission spectrum of gas sample -----
+        # https://radis.readthedocs.io/en/latest/source/radis.lbl.calc.html#radis.lbl.calc.calc_spectrum
+        s = calc_spectrum(
+            data["minWave"],
+            data["maxWave"],
+            molecule=data["molecule"],
+            isotope="1,2,3",
+            pressure=data["pressure"],
+            Tgas=294.15,  # hardcode
+            path_length=10,  # hardcode
+            wstep=wstep,  # (cm^-1)
+            verbose=False,  # hides HITRAN output
+            databank="hitran",
+            warnings={"AccuracyError": "ignore"},
+        )
+    except:
+        return False
+
+    return __process_spectra(data, s, find_peaks=True)
+
+def __generate_background(data):
+    '''
+    Generates a background sample using radis based on user given parameters.
+
+    That sample is then processed by __process_spectra.
+
+    If there is an issue reaching out to radis, the error is caught and False is returned
+
+        Paramters:
+            data (dict): the user given parameters
+
+        Return:
+            The fully processed sample or False if there is an error
+    '''
+
+    try:
+        wstep = __calc_wstep(data["resolution"], data["zeroFill"])
+        # ----- a.) transmission spectrum of gas sample -----
+        # https://radis.readthedocs.io/en/latest/source/radis.lbl.calc.html#radis.lbl.calc.calc_spectrum
+        s = calc_spectrum(
+            data["minWave"],
+            data["maxWave"],
+            molecule=data["molecule"],
+            isotope="1,2,3",
+            pressure=data["pressure"],
+            Tgas=294.15,  # hardcode
+            path_length=10,  # hardcode
+            wstep=wstep,  # (cm^-1)
+            verbose=False,  # hides HITRAN output
+            databank="hitran",
+            warnings={"AccuracyError": "ignore"},
+        )
+    except:
+        return False
+
+    w = s.get_wavelength()
+
+    spec_zeroY = Spectrum(
+        {
+            "wavelength": w,
+            "transmittance_noslit": __zeroY(w),
+            "radiance_noslit": np.zeros_like(w),
+        },
+        wunit="nm",
+        units={"radiance_noslit": "mW/cm2/sr/nm", "transmittance_noslit": ""},
+        name="CaF2 window",
+    )
+
+    return __process_spectra(data, spec_zeroY, find_peaks=False)
