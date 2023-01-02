@@ -1,13 +1,15 @@
 # Flask server
 #   https://flask.palletsprojects.com/en/2.2.x/
 #   python3 flask_api.py
+from setuptools import setup, find_packages
+setup(name= 'jupyter-notebook', packages= find_packages())
 
 from flask import Flask, request
 from flask_cors import CORS
 
 import json
 
-from functions import __param_check, __generate_spectra, __generate_background
+from jupyter_notebook.functions import __param_check, __generate_spectra, __generate_background
 
 app = Flask(__name__)
 CORS(app)
